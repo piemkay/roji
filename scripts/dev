@@ -5,6 +5,7 @@
 #   scripts/dev up         start (or restart) all three and check that they are connected
 #   scripts/dev status     show ports, processes and health
 #   scripts/dev env [test] print shell exports for this worktree's database (or test database)
+#   scripts/dev url [test] print only the database URL
 #   scripts/dev down       stop all three; the data is kept
 #   scripts/dev clean      stop all three, delete this worktree's data and release its ports
 #   scripts/dev db         start only Postgres; prints "started" or "running"
@@ -31,6 +32,11 @@ PORT_FIRST=20000
 PORT_BLOCKS=1000 # blocks of 10 ports; each worktree uses the first three of its block
 PG_USER=roji
 
+# This worktree's state. Set here so that nothing leaks in from the environment; filled only
+# from validated values (see load_state and allocate).
+port_base=
+db_name=
+
 say() { printf '%s\n' "$*" >&2; }
 die() {
   say "dev: $*"
@@ -44,7 +50,54 @@ need() {
   done
 }
 
-# --- Ports and names ---------------------------------------------------------------------------
+# --- State -------------------------------------------------------------------------------------
+
+valid_port_base() {
+  [[ $1 =~ ^[0-9]{5}$ ]] && (($1 >= PORT_FIRST && $1 < PORT_FIRST + PORT_BLOCKS * 10 && ($1 - PORT_FIRST) % 10 == 0))
+}
+
+# Short enough that the test database name ("<name>_test") stays within Postgres's 63 bytes.
+valid_db_name() { [[ $1 =~ ^[a-z][a-z0-9_]{0,57}$ ]]; }
+
+pg_port() { echo "$port_base"; }
+server_port() { echo $((port_base + 1)); }
+web_port() { echo $((port_base + 2)); }
+
+# Reads KEY=VALUE lines without executing anything; values that do not validate are ignored.
+load_state() {
+  port_base=
+  db_name=
+  [[ -f $state_file ]] || return 0
+  local key value
+  while IFS='=' read -r key value || [[ -n $key ]]; do
+    case "$key" in
+      PORT_BASE)
+        if valid_port_base "$value"; then port_base=$value; else say "dev: ignoring an invalid PORT_BASE in $state_file"; fi
+        ;;
+      DB_NAME)
+        if valid_db_name "$value"; then db_name=$value; else say "dev: ignoring an invalid DB_NAME in $state_file"; fi
+        ;;
+    esac
+  done <"$state_file"
+}
+
+write_state() {
+  if ! valid_port_base "$port_base" || ! valid_db_name "$db_name"; then
+    die "refusing to write invalid state"
+  fi
+  mkdir -p "$state_dir"
+  printf 'PORT_BASE=%s\nDB_NAME=%s\n' "$port_base" "$db_name" >"$state_file"
+}
+
+require_state() {
+  load_state
+  [[ -n $port_base && -n $db_name ]] ||
+    die "no valid state in $state_file; run scripts/dev up (or scripts/dev clean if it is damaged)"
+}
+
+database_url() { printf 'postgres://%s@127.0.0.1:%s/%s' "$PG_USER" "$(pg_port)" "$1"; }
+
+# --- Ports -------------------------------------------------------------------------------------
 
 path_hash() { printf '%s' "$root" | cksum | cut -d' ' -f1; }
 
@@ -57,6 +110,14 @@ claimable() {
   local owner
   owner=$(claim_owner "$1")
   [[ -z $owner || $owner == "$root" || ! -d $owner ]]
+}
+
+release_claims() {
+  local claim
+  for claim in "$claims_dir"/*; do
+    [[ -f $claim && $(cat "$claim" 2>/dev/null) == "$root" ]] && rm -f "$claim"
+  done
+  return 0
 }
 
 lock_ports() {
@@ -79,38 +140,13 @@ unlock_ports() {
   trap - EXIT
 }
 
-load_state() {
-  if [[ -f $state_file ]]; then
-    # shellcheck source=/dev/null
-    source "$state_file"
-  fi
-}
-
-write_state() {
-  mkdir -p "$state_dir"
-  cat >"$state_file" <<EOF
-PORT_BASE=$PORT_BASE
-PG_PORT=$PG_PORT
-SERVER_PORT=$SERVER_PORT
-WEB_PORT=$WEB_PORT
-DB_NAME=$DB_NAME
-EOF
-}
-
-set_ports() {
-  PORT_BASE=$1
-  PG_PORT=$1
-  SERVER_PORT=$(($1 + 1))
-  WEB_PORT=$(($1 + 2))
-}
-
 # Every port of the block is free, or used by this worktree's own running process.
 block_usable() {
   local base=$1
   claimable "$base" || return 1
-  if port_in_use "$base" && ! { [[ ${PG_PORT:-} == "$base" ]] && pg_running; }; then return 1; fi
-  if port_in_use $((base + 1)) && ! { [[ ${SERVER_PORT:-} == $((base + 1)) ]] && running server; }; then return 1; fi
-  if port_in_use $((base + 2)) && ! { [[ ${WEB_PORT:-} == $((base + 2)) ]] && running web; }; then return 1; fi
+  if port_in_use "$base" && ! { [[ $port_base == "$base" ]] && pg_running; }; then return 1; fi
+  if port_in_use $((base + 1)) && ! { [[ $port_base == "$base" ]] && running server; }; then return 1; fi
+  if port_in_use $((base + 2)) && ! { [[ $port_base == "$base" ]] && running web; }; then return 1; fi
   return 0
 }
 
@@ -118,14 +154,18 @@ block_usable() {
 # after the one its path hashes to.
 allocate() {
   load_state
-  if [[ -z ${DB_NAME:-} ]]; then
+  if [[ -z $db_name ]]; then
+    [[ ! -e $pg_data ]] ||
+      die "$pg_data exists but $state_file names no valid database; run scripts/dev clean"
     local slug
-    slug=$(basename "$root" | LC_ALL=C tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '_' | cut -c1-30)
-    DB_NAME=$(printf 'roji_%s_%08x' "${slug%_}" "$(path_hash)")
+    slug=$(basename "$root" | LC_ALL=C tr '[:upper:]' '[:lower:]' | LC_ALL=C tr -cs 'a-z0-9' '_' | cut -c1-30)
+    db_name=$(printf 'roji_%s_%08x' "${slug%_}" "$(path_hash)")
+    valid_db_name "$db_name" || die "cannot derive a database name from $root"
   fi
   lock_ports
-  if [[ -z ${PORT_BASE:-} ]] || ! block_usable "$PORT_BASE"; then
-    local start=$(($(path_hash) % PORT_BLOCKS)) i base found=
+  if [[ -z $port_base ]] || ! block_usable "$port_base"; then
+    local start i base found=
+    start=$(($(path_hash) % PORT_BLOCKS))
     for ((i = 0; i < PORT_BLOCKS; i++)); do
       base=$((PORT_FIRST + ((start + i) % PORT_BLOCKS) * 10))
       if block_usable "$base"; then
@@ -134,24 +174,90 @@ allocate() {
       fi
     done
     [[ -n $found ]] || die "no free block of ports in $PORT_FIRST-$((PORT_FIRST + PORT_BLOCKS * 10 - 1))"
-    if [[ -n ${PORT_BASE:-} && $(claim_owner "$PORT_BASE") == "$root" ]]; then
-      rm -f "$claims_dir/$PORT_BASE"
-    fi
-    set_ports "$found"
+    release_claims
+    port_base=$found
   fi
-  printf '%s\n' "$root" >"$claims_dir/$PORT_BASE"
+  printf '%s\n' "$root" >"$claims_dir/$port_base"
   unlock_ports
   write_state
 }
 
-require_state() {
-  load_state
-  [[ -n ${PORT_BASE:-} ]] || die "nothing has run in this worktree yet; run scripts/dev up"
+# --- Processes ---------------------------------------------------------------------------------
+
+boot_id() { cat /proc/sys/kernel/random/boot_id 2>/dev/null || echo unknown; }
+
+# The start time of a process in clock ticks since boot (field 22 of /proc/<pid>/stat).
+proc_start() {
+  local stat fields
+  stat=$(cat "/proc/$1/stat" 2>/dev/null) || return 1
+  read -ra fields <<<"${stat##*) }"
+  printf '%s\n' "${fields[19]}"
 }
 
-database_url() { printf 'postgres://%s@127.0.0.1:%s/%s' "$PG_USER" "$PG_PORT" "$1"; }
+# Records a process together with its start time and the boot it belongs to, so that a pid
+# reused by another process after a restart is never mistaken for ours.
+record_pid() {
+  printf '%s %s %s\n' "$2" "$(proc_start "$2" || echo none)" "$(boot_id)" >"$state_dir/$1.pid"
+}
+
+# Prints the recorded pid of a process this script started, if that process still runs.
+our_pid() {
+  local file="$state_dir/$1.pid" pid='' start='' boot=''
+  [[ -f $file ]] || return 1
+  read -r pid start boot <"$file" || true
+  [[ $pid =~ ^[0-9]+$ && $start =~ ^[0-9]+$ && $boot == "$(boot_id)" ]] || return 1
+  [[ $(proc_start "$pid" 2>/dev/null) == "$start" ]] || return 1
+  printf '%s\n' "$pid"
+}
+
+running() { our_pid "$1" >/dev/null; }
+
+# Starts a command in its own process group, so stopping it also stops its children.
+start_bg() {
+  local name=$1
+  shift
+  mkdir -p "$log_dir"
+  : >"$log_dir/$name.log"
+  setsid "$@" >>"$log_dir/$name.log" 2>&1 </dev/null &
+  record_pid "$name" $!
+}
+
+# Stops a process this script started; a pid file that names any other process is dropped.
+stop_bg() {
+  local name=$1 pid i
+  if pid=$(our_pid "$name"); then
+    kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+    for ((i = 0; i < 100; i++)); do
+      running "$name" || break
+      sleep 0.1
+    done
+    if running "$name"; then
+      kill -KILL -- "-$pid" 2>/dev/null || true
+    fi
+  fi
+  rm -f "$state_dir/$name.pid"
+}
 
 # --- Postgres ----------------------------------------------------------------------------------
+
+# Runs in a subshell (see pg_bin), so download_tmp and the trap end with it.
+download_postgres() {
+  local arch=$1 sha=$2 dir=$3
+  need curl sha256sum unzip tar xz
+  local url="https://repo1.maven.org/maven2/io/zonky/test/postgres/embedded-postgres-binaries-$arch/$PG_VERSION/embedded-postgres-binaries-$arch-$PG_VERSION.jar"
+  say "Downloading Postgres $PG_VERSION for $arch into $dir"
+  mkdir -p "$cache_dir"
+  download_tmp=$(mktemp -d "$cache_dir/download.XXXXXX")
+  trap 'rm -rf "$download_tmp"' EXIT
+  curl -fsSL --retry 3 -o "$download_tmp/postgres.jar" "$url"
+  printf '%s  %s\n' "$sha" "$download_tmp/postgres.jar" | sha256sum --check --quiet ||
+    die "checksum mismatch for $url"
+  unzip -q "$download_tmp/postgres.jar" '*.txz' -d "$download_tmp"
+  mkdir "$download_tmp/postgres"
+  tar -xJf "$download_tmp"/*.txz -C "$download_tmp/postgres"
+  mv -T "$download_tmp/postgres" "$dir" 2>/dev/null || [[ -x $dir/bin/postgres ]] ||
+    die "cannot install into $dir"
+}
 
 pg_bin() {
   if [[ -n ${ROJI_PG_BIN:-} ]]; then
@@ -173,28 +279,35 @@ pg_bin() {
   esac
   local dir="$cache_dir/postgres-$PG_VERSION-$arch"
   if [[ ! -x $dir/bin/postgres ]]; then
-    need curl sha256sum unzip tar xz
-    local url="https://repo1.maven.org/maven2/io/zonky/test/postgres/embedded-postgres-binaries-$arch/$PG_VERSION/embedded-postgres-binaries-$arch-$PG_VERSION.jar"
-    say "Downloading Postgres $PG_VERSION for $arch into $dir"
-    mkdir -p "$cache_dir"
-    local tmp
-    tmp=$(mktemp -d "$cache_dir/download.XXXXXX")
-    curl -fsSL --retry 3 -o "$tmp/postgres.jar" "$url"
-    printf '%s  %s\n' "$sha" "$tmp/postgres.jar" | sha256sum --check --quiet ||
-      die "checksum mismatch for $url"
-    unzip -q "$tmp/postgres.jar" '*.txz' -d "$tmp"
-    mkdir "$tmp/postgres"
-    tar -xJf "$tmp"/*.txz -C "$tmp/postgres"
-    mv -T "$tmp/postgres" "$dir" 2>/dev/null || [[ -x $dir/bin/postgres ]] || die "cannot install into $dir"
-    rm -rf "$tmp"
+    # In a subshell, so the cleanup trap removes the temporary folder however it ends.
+    (download_postgres "$arch" "$sha" "$dir")
   fi
   printf '%s\n' "$dir/bin"
 }
 
-pg_running() { [[ -f $pg_data/postmaster.pid ]] && "$(pg_bin)/pg_ctl" -D "$pg_data" status >/dev/null 2>&1; }
+# The pid in postmaster.pid, when that process is a postmaster serving this worktree's data.
+pg_pid() {
+  local pid='' cmdline
+  [[ -f $pg_data/postmaster.pid ]] || return 1
+  read -r pid <"$pg_data/postmaster.pid" || true
+  [[ $pid =~ ^[0-9]+$ ]] || return 1
+  cmdline=$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null) || return 1
+  [[ " $cmdline " == *" -D $pg_data "* ]] || return 1
+  printf '%s\n' "$pid"
+}
+
+pg_running() { pg_pid >/dev/null; }
+
+# Single-user mode exits with 0 even when a statement fails, so its output is checked instead.
+pg_single() {
+  local bin=$1 sql=$2 out
+  out=$(printf '%s\n' "$sql" | "$bin/postgres" --single -D "$pg_data" postgres 2>&1) || true
+  printf '%s\n' "$out" >>"$log_dir/postgres.log"
+  printf '%s\n' "$out"
+}
 
 pg_init() {
-  local bin=$1
+  local bin=$1 out
   [[ -f $pg_data/PG_VERSION ]] && return
   say "Creating the Postgres cluster in $pg_data"
   mkdir -p "$log_dir"
@@ -202,9 +315,13 @@ pg_init() {
     --locale=C --locale-provider=builtin --builtin-locale=C.UTF-8 >>"$log_dir/postgres.log" 2>&1 ||
     die "initdb failed; see $log_dir/postgres.log"
   # No client tools come with the download, so create the databases in single-user mode.
-  printf 'CREATE DATABASE "%s";\nCREATE DATABASE "%s_test";\n' "$DB_NAME" "$DB_NAME" |
-    "$bin/postgres" --single -D "$pg_data" postgres >>"$log_dir/postgres.log" 2>&1 ||
+  pg_single "$bin" "CREATE DATABASE $db_name;
+CREATE DATABASE ${db_name}_test;" >/dev/null
+  out=$(pg_single "$bin" "SELECT count(*) AS created FROM pg_database WHERE datname IN ('$db_name', '${db_name}_test');")
+  if [[ $out != *'created = "2"'* ]]; then
+    rm -rf "$pg_data"
     die "creating the databases failed; see $log_dir/postgres.log"
+  fi
 }
 
 pg_start() {
@@ -215,9 +332,11 @@ pg_start() {
   local bin
   bin=$(pg_bin)
   pg_init "$bin"
+  # A postmaster.pid that does not name our postmaster is stale (for example after a restart).
+  rm -f "$pg_data/postmaster.pid"
   mkdir -p "$log_dir"
   "$bin/pg_ctl" -D "$pg_data" -l "$log_dir/postgres.log" -w -t 60 \
-    -o "-p $PG_PORT -c listen_addresses=127.0.0.1 -c unix_socket_directories=''" start >/dev/null ||
+    -o "-p $(pg_port) -c listen_addresses=127.0.0.1 -c unix_socket_directories=''" start >/dev/null ||
     die "Postgres did not start; see $log_dir/postgres.log"
   echo started
 }
@@ -229,38 +348,6 @@ pg_stop() {
 }
 
 # --- Server and web app ------------------------------------------------------------------------
-
-pid_of() { cat "$state_dir/$1.pid" 2>/dev/null || true; }
-
-running() {
-  local pid
-  pid=$(pid_of "$1")
-  [[ -n $pid ]] && kill -0 "$pid" 2>/dev/null
-}
-
-# Starts a command in its own process group, so stopping it also stops its children.
-start_bg() {
-  local name=$1
-  shift
-  mkdir -p "$log_dir"
-  : >"$log_dir/$name.log"
-  setsid "$@" >>"$log_dir/$name.log" 2>&1 </dev/null &
-  echo $! >"$state_dir/$name.pid"
-}
-
-stop_bg() {
-  local name=$1 pid i
-  pid=$(pid_of "$name")
-  if [[ -n $pid ]] && kill -0 "$pid" 2>/dev/null; then
-    kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
-    for ((i = 0; i < 100; i++)); do
-      kill -0 "$pid" 2>/dev/null || break
-      sleep 0.1
-    done
-    kill -KILL -- "-$pid" 2>/dev/null || true
-  fi
-  rm -f "$state_dir/$name.pid"
-}
 
 # Waits until a URL answers with 2xx; prints the body.
 wait_for() {
@@ -284,24 +371,23 @@ start_server() {
     --message-format=json-render-diagnostics |
     sed -n 's/.*"executable":"\([^"]*\)".*/\1/p' | tail -n 1)
   [[ -x $exe ]] || die "cargo build did not produce roji-server"
-  DATABASE_URL=$(database_url "$DB_NAME") ROJI_ADDR="127.0.0.1:$SERVER_PORT" \
+  DATABASE_URL=$(database_url "$db_name") ROJI_ADDR="127.0.0.1:$(server_port)" \
     start_bg server "$exe"
-  wait_for "http://127.0.0.1:$SERVER_PORT/api/health" server >/dev/null
+  wait_for "http://127.0.0.1:$(server_port)/api/health" server >/dev/null
 }
 
 start_web() {
   say "Installing web dependencies"
   pnpm --dir "$root/web" install --frozen-lockfile --silent >&2
-  ROJI_API_URL="http://127.0.0.1:$SERVER_PORT" start_bg web \
-    "$root/web/node_modules/.bin/vite" "$root/web" --host 127.0.0.1 --port "$WEB_PORT" --strictPort
-  wait_for "http://127.0.0.1:$WEB_PORT/" web >/dev/null
+  ROJI_API_URL="http://127.0.0.1:$(server_port)" start_bg web \
+    "$root/web/node_modules/.bin/vite" "$root/web" --host 127.0.0.1 --port "$(web_port)" --strictPort
+  wait_for "http://127.0.0.1:$(web_port)/" web >/dev/null
 }
 
 # --- Commands ----------------------------------------------------------------------------------
 
 cmd_up() {
   need cargo pnpm curl setsid
-  load_state
   stop_bg web
   stop_bg server
   allocate
@@ -309,14 +395,14 @@ cmd_up() {
   start_server
   start_web
   local health
-  health=$(wait_for "http://127.0.0.1:$WEB_PORT/api/health" web) ||
+  health=$(wait_for "http://127.0.0.1:$(web_port)/api/health" web) ||
     die "the web app cannot reach the server"
   [[ $health == *'"database":"ok"'* ]] || die "unexpected health: $health"
   say ""
   say "Roji is running for $root"
-  say "  Web app   http://127.0.0.1:$WEB_PORT/"
-  say "  Server    http://127.0.0.1:$SERVER_PORT/api/health"
-  say "  Postgres  $(database_url "$DB_NAME")"
+  say "  Web app   http://127.0.0.1:$(web_port)/"
+  say "  Server    http://127.0.0.1:$(server_port)/api/health"
+  say "  Postgres  $(database_url "$db_name")"
   say "Health through the web app: $health"
   say "Stop with scripts/dev down; delete the data with scripts/dev clean."
 }
@@ -325,26 +411,41 @@ cmd_status() {
   require_state
   local health
   printf 'Worktree  %s\n' "$root"
-  printf 'Postgres  %-40s %s\n' "$(database_url "$DB_NAME")" "$(pg_running && echo running || echo stopped)"
-  printf 'Server    %-40s %s\n' "http://127.0.0.1:$SERVER_PORT" "$(running server && echo running || echo stopped)"
-  printf 'Web app   %-40s %s\n' "http://127.0.0.1:$WEB_PORT" "$(running web && echo running || echo stopped)"
+  printf 'Postgres  %-40s %s\n' "$(database_url "$db_name")" "$(pg_running && echo running || echo stopped)"
+  printf 'Server    %-40s %s\n' "http://127.0.0.1:$(server_port)" "$(running server && echo running || echo stopped)"
+  printf 'Web app   %-40s %s\n' "http://127.0.0.1:$(web_port)" "$(running web && echo running || echo stopped)"
   if running server; then
-    health=$(curl -sS --max-time 5 "http://127.0.0.1:$SERVER_PORT/api/health" 2>&1 || true)
+    health=$(curl -sS --max-time 5 "http://127.0.0.1:$(server_port)/api/health" 2>&1 || true)
     printf 'Health    %s\n' "$health"
   fi
 }
 
+database_for() {
+  case "${1:-}" in
+    "") echo "$db_name" ;;
+    test) echo "${db_name}_test" ;;
+    *) die "unknown database '$1'; use nothing or test" ;;
+  esac
+}
+
 cmd_env() {
   require_state
-  local db=$DB_NAME
-  [[ ${1:-} == test ]] && db="${DB_NAME}_test"
-  printf 'export DATABASE_URL=%s\n' "$(database_url "$db")"
-  printf 'export ROJI_ADDR=127.0.0.1:%s\n' "$SERVER_PORT"
-  printf 'export ROJI_API_URL=http://127.0.0.1:%s\n' "$SERVER_PORT"
+  local db
+  db=$(database_for "${1:-}")
+  printf 'export DATABASE_URL=%q\n' "$(database_url "$db")"
+  printf 'export ROJI_ADDR=%q\n' "127.0.0.1:$(server_port)"
+  printf 'export ROJI_API_URL=%q\n' "http://127.0.0.1:$(server_port)"
+}
+
+cmd_url() {
+  require_state
+  local db
+  db=$(database_for "${1:-}")
+  database_url "$db"
+  echo
 }
 
 cmd_down() {
-  load_state
   stop_bg web
   stop_bg server
   pg_stop
@@ -352,9 +453,7 @@ cmd_down() {
 
 cmd_clean() {
   cmd_down
-  if [[ -n ${PORT_BASE:-} && $(claim_owner "$PORT_BASE") == "$root" ]]; then
-    rm -f "$claims_dir/$PORT_BASE"
-  fi
+  release_claims
   rm -rf "$state_dir"
   say "Removed $state_dir"
 }
@@ -368,15 +467,13 @@ case "${1:-}" in
   up) cmd_up ;;
   status) cmd_status ;;
   env) cmd_env "${2:-}" ;;
+  url) cmd_url "${2:-}" ;;
   down) cmd_down ;;
   clean) cmd_clean ;;
   db) cmd_db ;;
-  db-stop)
-    load_state
-    pg_stop
-    ;;
+  db-stop) pg_stop ;;
   *)
-    sed -n '2,18s/^# \{0,1\}//p' "${BASH_SOURCE[0]}" >&2
+    sed -n '2,19s/^# \{0,1\}//p' "${BASH_SOURCE[0]}" >&2
     exit 2
     ;;
 esac

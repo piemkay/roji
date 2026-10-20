@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # The one command: formatting, lint, type checks, boundary checks and tests for the Rust
-# workspace and the web app, plus the secret and one-module checks. CI runs the same command.
+# workspace and the web app, the tests of these scripts, plus the secret and one-module checks.
+# CI runs the same command.
 #
 # The Rust tests need Postgres. With DATABASE_URL set (as in CI) they use that database;
 # otherwise this worktree's Postgres is started (scripts/dev db) and stopped again afterwards
@@ -54,12 +55,18 @@ scripts/check-secrets
 step "One change, one module"
 scripts/check-scope
 
+step "Tests of the scripts"
+for test in scripts/tests/*.sh; do
+  bash "$test"
+done
+
 step "Rust: tests, including the boundary checks, against Postgres"
 if [[ -z ${DATABASE_URL:-} ]]; then
   if [[ $(scripts/dev db) == started ]]; then
     trap 'scripts/dev db-stop' EXIT
   fi
-  eval "$(scripts/dev env test)"
+  DATABASE_URL=$(scripts/dev url test)
+  export DATABASE_URL
 fi
 cargo test --workspace --locked
 
