@@ -7,6 +7,7 @@
 # otherwise this worktree's Postgres is started (scripts/dev db) and stopped again afterwards
 # if it was not running before.
 set -euo pipefail
+shopt -s inherit_errexit # a failing command inside $(...) stops the script too
 
 root=$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)
 cd "$root"

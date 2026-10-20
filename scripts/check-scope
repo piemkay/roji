@@ -15,6 +15,7 @@
 #
 # The base is ROJI_BASE_REF, else origin/$GITHUB_BASE_REF in a pull request, else origin/main.
 set -euo pipefail
+shopt -s inherit_errexit # a failing command inside $(...) stops the script too
 
 root=$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)
 cd "$root"

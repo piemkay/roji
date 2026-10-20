@@ -67,6 +67,16 @@ rm .env
 
 check "passes again once the branch is clean" passes scripts/check-secrets
 
+# A download that fails (here: through a proxy that refuses) stops the check and leaves no
+# temporary folder behind.
+mkdir -p "$work/empty-cache"
+check "fails when the gitleaks download fails" fails env XDG_CACHE_HOME="$work/empty-cache" \
+  HTTPS_PROXY=http://127.0.0.1:1 https_proxy=http://127.0.0.1:1 scripts/check-secrets
+lacks() { ! grep -q "$1" "$2"; }
+no_downloads() { ! compgen -G "$1/roji/download.*" >/dev/null; }
+check "stops before scanning" lacks "Scanning" "$work/out"
+check "leaves no download folder behind" no_downloads "$work/empty-cache"
+
 if ((failures > 0)); then
   echo "$failures scripts/check-secrets test(s) failed"
   exit 1

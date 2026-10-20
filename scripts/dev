@@ -18,6 +18,7 @@
 # Postgres comes from ROJI_PG_BIN (a directory with initdb, pg_ctl and postgres) or is
 # downloaded once into ~/.cache/roji and checked against a pinned SHA-256.
 set -euo pipefail
+shopt -s inherit_errexit # a failing command inside $(...) stops the script too
 
 root=$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)
 state_dir="$root/.dev"

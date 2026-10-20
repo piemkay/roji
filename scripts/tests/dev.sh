@@ -119,6 +119,18 @@ check "reports databases that single-user mode failed to create" \
   grep -q "creating the databases failed" "$work/c.out"
 check "leaves no half-made cluster behind" missing "$c/.dev/postgres"
 
+# A download that fails (here: through a proxy that refuses) stops the script and leaves no
+# temporary folder behind.
+d=$(new_repo d)
+mkdir -p "$work/empty-cache"
+env -u ROJI_PG_BIN XDG_CACHE_HOME="$work/empty-cache" HTTPS_PROXY=http://127.0.0.1:1 \
+  https_proxy=http://127.0.0.1:1 "$d/scripts/dev" db >"$work/d.out" 2>&1
+status=$?
+check "fails when the Postgres download fails" [ "$status" -ne 0 ]
+no_downloads() { ! compgen -G "$1/roji/download.*" >/dev/null; }
+check "leaves no download folder behind" no_downloads "$work/empty-cache"
+check "creates no cluster without binaries" missing "$d/.dev/postgres"
+
 if ((failures > 0)); then
   echo "$failures scripts/dev test(s) failed"
   exit 1
