@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# One change, one module. Compared with the main branch, the current branch (including files not
+# committed yet) may change at most one existing module. A module is one crate in crates/ or the
+# web app in web/. Shared files (root manifests, lock files, scripts/, tools/, CI and docs) and
+# modules that do not exist on the main branch yet do not count.
+#
+# The base is ROJI_BASE_REF, else origin/$GITHUB_BASE_REF in a pull request, else origin/main.
+set -euo pipefail
+
+root=$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)
+cd "$root"
+
+base_ref=${ROJI_BASE_REF:-}
+if [[ -z $base_ref ]]; then
+  base_ref="origin/${GITHUB_BASE_REF:-main}"
+fi
+if ! git rev-parse --verify --quiet "$base_ref^{commit}" >/dev/null; then
+  if [[ -n ${CI:-} ]]; then
+    echo "check-scope: $base_ref is missing; fetch the full history" >&2
+    exit 1
+  fi
+  echo "check-scope: no $base_ref to compare with; skipped" >&2
+  exit 0
+fi
+base=$(git merge-base "$base_ref" HEAD)
+
+module_of() {
+  case "$1" in
+    crates/*/*)
+      local rest=${1#crates/}
+      printf 'crates/%s\n' "${rest%%/*}"
+      ;;
+    web/*) printf 'web\n' ;;
+  esac
+}
+
+declare -A files_of=()
+while IFS= read -r file; do
+  module=$(module_of "$file")
+  [[ -n $module ]] || continue
+  git cat-file -e "$base:$module" 2>/dev/null || continue # new module
+  files_of[$module]+="    $file"$'\n'
+done < <({
+  git diff --name-only --no-renames "$base"
+  git ls-files --others --exclude-standard
+} | sort -u)
+
+if ((${#files_of[@]} > 1)); then
+  echo "One change, one module: compared with $base_ref this branch changes ${#files_of[@]} existing modules:" >&2
+  for module in $(printf '%s\n' "${!files_of[@]}" | sort); do
+    printf '  %s\n%s' "$module" "${files_of[$module]}" >&2
+  done
+  echo "Split the work so that each pull request changes one module." >&2
+  exit 1
+fi
+
+if ((${#files_of[@]} == 1)); then
+  echo "Changes one existing module: ${!files_of[*]}."
+else
+  echo "Changes no existing module."
+fi
