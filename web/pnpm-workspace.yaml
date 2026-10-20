@@ -1,0 +1,4 @@
+# Install only package versions that have been published for at least three days, so a
+# compromised release is likely to be found and pulled before it reaches this project.
+# pnpm also checks every entry of the lockfile against this on install.
+minimumReleaseAge: 4320

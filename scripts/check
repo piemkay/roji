@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# The one command: formatting, lint, type checks, boundary checks and tests for the Rust
+# workspace and the web app, the tests of these scripts, plus the secret and one-module checks.
+# CI runs the same command.
+#
+# The Rust tests need Postgres. With DATABASE_URL set (as in CI) they use that database;
+# otherwise this worktree's Postgres is started (scripts/dev db) and stopped again afterwards
+# if it was not running before.
+set -euo pipefail
+shopt -s inherit_errexit # a failing command inside $(...) stops the script too
+
+root=$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)
+cd "$root"
+
+step() { printf '\n==> %s\n' "$*"; }
+
+for tool in cargo cc node pnpm curl; do
+  command -v "$tool" >/dev/null || {
+    echo "check: $tool is required; see Development in README.md" >&2
+    exit 1
+  }
+done
+
+# The same Node.js major version as CI, which installs the version in .node-version.
+node_wanted=$(cat .node-version)
+node_running=$(node --version)
+node_running=${node_running#v}
+if [[ ${node_running%%.*} != "${node_wanted%%.*}" ]]; then
+  echo "check: Node.js ${node_wanted%%.*} is required (.node-version says $node_wanted); this is $node_running" >&2
+  exit 1
+fi
+
+if command -v rustup >/dev/null; then
+  step "Rust toolchain from rust-toolchain.toml"
+  rustup toolchain install --no-self-update
+fi
+
+step "Rust: formatting"
+cargo fmt --all --check
+
+step "Rust: lint and type check"
+cargo clippy --workspace --all-targets --locked -- -D warnings
+
+step "Web: dependencies, at least three days old"
+pnpm --dir web install --frozen-lockfile
+
+step "Web: formatting"
+pnpm --dir web run format:check
+
+step "Web: lint"
+pnpm --dir web run lint
+
+step "Web: type check"
+pnpm --dir web run typecheck
+
+step "Web: tests, including the boundary check"
+pnpm --dir web run test
+
+step "Web: build"
+pnpm --dir web run build
+
+step "No secrets in the repository"
+scripts/check-secrets
+
+step "One change, one module"
+scripts/check-scope
+
+step "Tests of the scripts"
+for test in scripts/tests/*.sh; do
+  bash "$test"
+done
+
+step "Rust: tests, including the boundary checks, against Postgres"
+if [[ -z ${DATABASE_URL:-} ]]; then
+  if [[ $(scripts/dev db) == started ]]; then
+    trap 'scripts/dev db-stop' EXIT
+  fi
+  DATABASE_URL=$(scripts/dev url test)
+  export DATABASE_URL
+fi
+cargo test --workspace --locked
+
+step "All checks passed"

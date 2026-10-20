@@ -2,7 +2,7 @@
 
 A calm to-do app for individuals, households and teams. Capture a task in plain text, see only what matters today, and let the app recognise dates, people and places in your words. Self-hosted or hosted: one deployment can serve many separate spaces.
 
-Status: planning. Nothing is built yet.
+Status: scaffold. The repository builds, checks and runs a health page; no features yet.
 
 ## Stack
 
@@ -40,6 +40,27 @@ Not scheduled: sharing, groups and invitations (the data model carries spaces fr
 - Backups are handled by the deployment platform; the operator chooses the tooling.
 - Built by coding agents. Work is specified as GitHub issues. `main` is protected: every change is a pull request, merged one at a time.
 - MIT licence.
+
+## Development
+
+Develop on Linux, or on Windows through WSL. You need:
+
+- [rustup](https://rustup.rs) and a C compiler as `cc`, which Rust uses to link (for example `build-essential` on Debian or Ubuntu). `rust-toolchain.toml` selects the Rust version.
+- Node.js 24, the major version in `.node-version` (CI installs exactly that version), and pnpm 12. `web/package.json` names the exact pnpm version.
+- `git`, `curl`, `tar`, `xz`, `unzip`, `sha256sum` and `setsid`, which most Linux distributions include.
+
+Postgres 18 and gitleaks are downloaded on first use into `~/.cache/roji` and checked against pinned SHA-256 sums. To use your own Postgres 18, set `ROJI_PG_BIN` to its `bin` directory.
+
+| Command | What it does |
+|---|---|
+| `scripts/check` | The one check: formatting, lint, type checks, boundary checks and tests for the Rust workspace and the web app, the tests of the scripts in `scripts/tests`, plus the secret scan and the one-module rule. CI runs the same command. |
+| `scripts/dev up` | Starts Postgres, the server and the web app for this worktree and checks that they are connected. Each worktree gets its own ports and database, so several can run at once. |
+| `scripts/dev status` | Shows ports, processes and health. |
+| `scripts/dev down` | Stops all three; the data stays in `.dev/`. |
+| `scripts/dev clean` | Stops all three and deletes this worktree's data. |
+| `scripts/dev env test` | Prints `export` lines that point `cargo test` at this worktree's test database. |
+
+`AGENTS.md` lists the rules the checks enforce. The Rust crates are in `crates/` (`domain`, `parse`, `store`, `server`), the React and TypeScript web app (built with Vite) is in `web/`, and the crate boundary checks are in `tools/boundaries`.
 
 ## Licence
 
