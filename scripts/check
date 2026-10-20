@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# The one command: formatting, lint, type checks, boundary checks and tests for the Rust
+# workspace and the web app, plus the secret and one-module checks. CI runs the same command.
+#
+# The Rust tests need Postgres. With DATABASE_URL set (as in CI) they use that database;
+# otherwise this worktree's Postgres is started (scripts/dev db) and stopped again afterwards
+# if it was not running before.
+set -euo pipefail
+
+root=$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)
+cd "$root"
+
+step() { printf '\n==> %s\n' "$*"; }
+
+for tool in cargo pnpm curl; do
+  command -v "$tool" >/dev/null || {
+    echo "check: $tool is required; see Development in README.md" >&2
+    exit 1
+  }
+done
+
+if command -v rustup >/dev/null; then
+  step "Rust toolchain from rust-toolchain.toml"
+  rustup toolchain install --no-self-update
+fi
+
+step "Rust: formatting"
+cargo fmt --all --check
+
+step "Rust: lint and type check"
+cargo clippy --workspace --all-targets --locked -- -D warnings
+
+step "Web: dependencies"
+pnpm --dir web install --frozen-lockfile
+
+step "Web: formatting"
+pnpm --dir web run format:check
+
+step "Web: lint"
+pnpm --dir web run lint
+
+step "Web: type check"
+pnpm --dir web run typecheck
+
+step "Web: tests, including the boundary check"
+pnpm --dir web run test
+
+step "Web: build"
+pnpm --dir web run build
+
+step "No secrets in the repository"
+scripts/check-secrets
+
+step "One change, one module"
+scripts/check-scope
+
+step "Rust: tests, including the boundary checks, against Postgres"
+if [[ -z ${DATABASE_URL:-} ]]; then
+  if [[ $(scripts/dev db) == started ]]; then
+    trap 'scripts/dev db-stop' EXIT
+  fi
+  eval "$(scripts/dev env test)"
+fi
+cargo test --workspace --locked
+
+step "All checks passed"
