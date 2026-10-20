@@ -20,9 +20,11 @@ Run `scripts/check` before every commit. CI runs the same command, and it must p
   outside `web/`. It reaches the server only over HTTP at `/api`.
 - **No secrets in the repository.** gitleaks scans the commits of this branch that are not on
   `main`, and the uncommitted files; no `.env` file may be tracked.
-- **One change, one module.** Compared with `main`, a branch changes at most one existing
-  module: one crate in `crates/` or the web app in `web/`. Shared files (root manifests, lock
-  files, `scripts/`, `tools/`, CI, docs) and new modules don't count.
+- **One change, one module.** Compared with `main`, a branch changes at most one module. A
+  module is a feature area across the layers: `tasks` is `src/tasks.rs` or `src/tasks/` and
+  `tests/tasks.rs` in any crate, and `web/src/tasks/`. Crate roots and entry points (`lib`,
+  `main`, `mod`, `bin`, `App`), boundary tests, manifests, lock files, `scripts/`, `tools/`,
+  CI and docs are shared and don't count.
 
 ## Running it
 

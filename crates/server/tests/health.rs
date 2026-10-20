@@ -17,7 +17,7 @@ use tower::ServiceExt;
 fn database_url() -> String {
     std::env::var("DATABASE_URL").expect(
         "DATABASE_URL must name a Postgres database: run scripts/check, \
-         or scripts/dev up and then eval \"$(scripts/dev env)\"",
+         or scripts/dev db and then eval \"$(scripts/dev env test)\"",
     )
 }
 

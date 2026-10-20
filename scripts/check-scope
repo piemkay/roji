@@ -1,8 +1,17 @@
 #!/usr/bin/env bash
 # One change, one module. Compared with the main branch, the current branch (including files not
-# committed yet) may change at most one existing module. A module is one crate in crates/ or the
-# web app in web/. Shared files (root manifests, lock files, scripts/, tools/, CI and docs) and
-# modules that do not exist on the main branch yet do not count.
+# committed yet) may change at most one module.
+#
+# A module is a feature area, such as tasks or projects, and it cuts across the layers. Its
+# name is the first part of a path below src/ or tests/ in any crate in crates/, or below
+# web/src/ or web/tests/: crates/store/src/tasks.rs, crates/server/src/tasks/routes.rs,
+# crates/server/tests/tasks.rs and web/src/tasks/List.tsx all belong to "tasks". A file
+# directly below such a folder counts by its name without extensions (tasks.test.ts is
+# "tasks"). Names are compared in lower case, with "-" read as "_".
+#
+# Shared files belong to no module and do not count: the crate roots and entry points (lib,
+# main, mod, bin, App), the boundary tests, manifests and lock files, scripts/, tools/, CI and
+# docs.
 #
 # The base is ROJI_BASE_REF, else origin/$GITHUB_BASE_REF in a pull request, else origin/main.
 set -euo pipefail
@@ -10,12 +19,9 @@ set -euo pipefail
 root=$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)
 cd "$root"
 
-base_ref=${ROJI_BASE_REF:-}
-if [[ -z $base_ref ]]; then
-  base_ref="origin/${GITHUB_BASE_REF:-main}"
-fi
+base_ref=${ROJI_BASE_REF:-origin/${GITHUB_BASE_REF:-main}}
 if ! git rev-parse --verify --quiet "$base_ref^{commit}" >/dev/null; then
-  if [[ -n ${CI:-} ]]; then
+  if [[ -n ${CI:-} || -n ${ROJI_BASE_REF:-} ]]; then
     echo "check-scope: $base_ref is missing; fetch the full history" >&2
     exit 1
   fi
@@ -24,21 +30,32 @@ if ! git rev-parse --verify --quiet "$base_ref^{commit}" >/dev/null; then
 fi
 base=$(git merge-base "$base_ref" HEAD)
 
+# Prints the module a path belongs to, or nothing for a shared file.
 module_of() {
-  case "$1" in
-    crates/*/*)
-      local rest=${1#crates/}
-      printf 'crates/%s\n' "${rest%%/*}"
+  local path=$1 rest name
+  case "$path" in
+    crates/*/src/?* | crates/*/tests/?* | crates/*/benches/?* | crates/*/examples/?*)
+      rest=${path#crates/*/}
+      rest=${rest#*/}
       ;;
-    web/*) printf 'web\n' ;;
+    web/src/?* | web/tests/?*) rest=${path#web/*/} ;;
+    *) return 0 ;;
   esac
+  name=${rest%%/*}
+  if [[ $name == "$rest" ]]; then
+    name=${name%%.*} # a file: its name without extensions
+  fi
+  name=$(printf '%s' "$name" | LC_ALL=C tr '[:upper:]-' '[:lower:]_')
+  case "$name" in
+    "" | lib | main | mod | bin | app | boundary) return 0 ;;
+  esac
+  printf '%s\n' "$name"
 }
 
 declare -A files_of=()
 while IFS= read -r file; do
   module=$(module_of "$file")
   [[ -n $module ]] || continue
-  git cat-file -e "$base:$module" 2>/dev/null || continue # new module
   files_of[$module]+="    $file"$'\n'
 done < <({
   git diff --name-only --no-renames "$base"
@@ -46,7 +63,7 @@ done < <({
 } | sort -u)
 
 if ((${#files_of[@]} > 1)); then
-  echo "One change, one module: compared with $base_ref this branch changes ${#files_of[@]} existing modules:" >&2
+  echo "One change, one module: compared with $base_ref this branch changes ${#files_of[@]} modules:" >&2
   for module in $(printf '%s\n' "${!files_of[@]}" | sort); do
     printf '  %s\n%s' "$module" "${files_of[$module]}" >&2
   done
@@ -55,7 +72,7 @@ if ((${#files_of[@]} > 1)); then
 fi
 
 if ((${#files_of[@]} == 1)); then
-  echo "Changes one existing module: ${!files_of[*]}."
+  echo "Changes one module: ${!files_of[*]}."
 else
-  echo "Changes no existing module."
+  echo "Changes no module, only shared files."
 fi

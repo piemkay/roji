@@ -1,11 +1,12 @@
-//! Runs against the real Postgres database named by `DATABASE_URL`; `scripts/check` provides one.
+//! The store answers a ping from the real Postgres database named by `DATABASE_URL`;
+//! `scripts/check` provides one.
 
 use roji_store::Store;
 
 fn database_url() -> String {
     std::env::var("DATABASE_URL").expect(
         "DATABASE_URL must name a Postgres database: run scripts/check, \
-         or scripts/dev up and then eval \"$(scripts/dev env)\"",
+         or scripts/dev db and then eval \"$(scripts/dev env test)\"",
     )
 }
 
