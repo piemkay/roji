@@ -106,22 +106,55 @@ fn std_brought_back_into_a_no_std_crate_is_flagged() {
     assert_reports(&violations("", lib_rs, &[]), "extern crate std");
 }
 
+/// A file next to `src/` that the boundary scan does not read by itself.
+const OUTSIDE: [(&str, &str); 1] = [(
+    "outside.rs",
+    "extern crate std;\npub fn io() { let _ = std::fs::read(\"x\"); }\n",
+)];
+
 #[test]
 fn code_included_from_outside_src_is_flagged() {
-    let outside = [(
-        "outside.rs",
-        "extern crate std;\npub fn io() { let _ = std::fs::read(\"x\"); }\n",
-    )];
     let included = format!("{CLEAN}include!(\"../outside.rs\");\n");
-    assert_reports(
-        &violations("", &included, &outside),
-        "include! \"../outside.rs\"",
-    );
+    assert_reports(&violations("", &included, &OUTSIDE), "uses `include!`");
     let module = format!("{CLEAN}#[path = \"../outside.rs\"]\nmod outside;\n");
     assert_reports(
-        &violations("", &module, &outside),
-        "#[path] \"../outside.rs\"",
+        &violations("", &module, &OUTSIDE),
+        "`path =` in an attribute",
     );
+}
+
+// The four bypasses below passed the check before it read whole token streams.
+
+#[test]
+fn an_extern_crate_made_by_a_macro_is_flagged() {
+    let lib_rs =
+        format!("{CLEAN}macro_rules! hide {{ () => {{ extern crate std as s; }} }}\nhide!();\n");
+    let found = violations("", &lib_rs, &[]);
+    assert_reports(&found, "extern crate std");
+    assert_reports(&found, "macro_rules!");
+}
+
+#[test]
+fn a_module_path_inside_cfg_attr_is_flagged() {
+    let lib_rs = format!("{CLEAN}#[cfg_attr(all(), path = \"../outside.rs\")]\nmod outside;\n");
+    assert_reports(
+        &violations("", &lib_rs, &OUTSIDE),
+        "`path =` in an attribute",
+    );
+}
+
+#[test]
+fn an_include_inside_a_macro_is_flagged() {
+    let lib_rs = format!(
+        "{CLEAN}macro_rules! inc {{ () => {{ include!(\"../outside.rs\"); }} }}\ninc!();\n"
+    );
+    assert_reports(&violations("", &lib_rs, &OUTSIDE), "uses `include!`");
+}
+
+#[test]
+fn a_renamed_include_is_flagged() {
+    let lib_rs = format!("{CLEAN}use core::include as inc;\ninc!(\"../outside.rs\");\n");
+    assert_reports(&violations("", &lib_rs, &OUTSIDE), "uses `include!`");
 }
 
 #[test]

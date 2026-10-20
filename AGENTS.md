@@ -10,8 +10,9 @@ Run `scripts/check` before every commit. CI runs the same command, and it must p
 - **Crate boundaries.** Each crate's `tests/boundary.rs` states what it may use:
   - `roji-domain` and `roji-parse` are I/O-free: `#![no_std]` (only `core` and `alloc`), no
     async runtime, database or web crate for any target, no external crate that is not on
-    their list, no console macros or `extern` blocks, and `include!` or `#[path]` only for
-    files inside `src/`.
+    their list, and nowhere in their source, macro bodies and attributes included, any
+    `macro_rules!`, `include!`-style macro (under any name), `path =` attribute, `extern`
+    block, console macro or `extern crate` other than `alloc` and `core`.
   - `roji-domain` uses no other crate of the workspace; `roji-parse` may use `roji-domain`.
   - `roji-store` owns the database and may use `roji-domain`, but no HTTP or web crate.
   - `roji-server` may use the other crates, reaches the database only through `roji-store`,

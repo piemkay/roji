@@ -1,13 +1,16 @@
-//! Finds I/O in Rust source: paths into the `std` modules that reach files, the network,
-//! processes, the environment, threads or the clock; console macros; `extern` blocks; extern
-//! crates other than `alloc` and `core`; and `include!` or `#[path]` reaching outside `src/`.
+//! Finds I/O, and ways to hide it, in the Rust source of an I/O-free crate: paths into the `std`
+//! modules that reach files, the network, processes, the environment, threads or the clock;
+//! console macros; `extern` blocks; extern crates other than `alloc` and `core`; macros defined
+//! with `macro_rules!`; `include!`, `include_str!` and `include_bytes!` under any name; and
+//! `path =` in any attribute. The rules run on the whole token stream of each file, so they also
+//! see macro bodies and attribute arguments such as `cfg_attr`.
+//!
 //! Also reads the attributes of a crate root.
 
 use std::collections::BTreeSet;
-use std::path::{Component, Path};
 use std::str::FromStr;
 
-use proc_macro2::{Spacing, Span, TokenStream, TokenTree};
+use proc_macro2::{Delimiter, Spacing, Span, TokenStream, TokenTree};
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 
@@ -29,7 +32,13 @@ pub const IO_PATHS: &[&str] = &[
 /// Macros that write to the console.
 pub const IO_MACROS: &[&str] = &["dbg", "eprint", "eprintln", "print", "println"];
 
-/// One piece of I/O found in a source file.
+/// Macros that read other files into the crate at compile time.
+pub const INCLUDE_MACROS: &[&str] = &["include", "include_bytes", "include_str"];
+
+/// The only crates an I/O-free crate may declare with `extern crate`.
+const ALLOWED_EXTERN_CRATES: &[&str] = &["alloc", "core"];
+
+/// One piece of I/O, or of hidden code, found in a source file.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Finding {
     pub line: usize,
@@ -70,7 +79,7 @@ pub fn crate_attributes(source: &str) -> CrateAttributes {
     found
 }
 
-/// Every piece of I/O in `source`, one finding per line and kind.
+/// Every finding in `source`, one per line and kind.
 pub fn scan_source(source: &str) -> Vec<Finding> {
     let mut findings = BTreeSet::new();
     match syn::parse_file(source) {
@@ -85,11 +94,21 @@ pub fn scan_source(source: &str) -> Vec<Finding> {
             });
         }
     }
-    // Paths inside macro calls are plain tokens to syn, so read the tokens as well.
-    if let Ok(tokens) = TokenStream::from_str(source) {
-        let mut flat = Vec::new();
-        flatten(tokens, &mut flat);
-        scan_tokens(&flat, &mut findings);
+    // syn sees macro bodies and attribute arguments only as tokens, so the rules that must
+    // also hold there run on the token stream of the whole file.
+    match TokenStream::from_str(source) {
+        Ok(tokens) => {
+            scan_token_rules(tokens.clone(), false, &mut findings);
+            let mut flat = Vec::new();
+            flatten(tokens, &mut flat);
+            scan_std_paths(&flat, &mut findings);
+        }
+        Err(err) => {
+            findings.insert(Finding {
+                line: err.span().start().line,
+                message: format!("does not tokenize: {err}"),
+            });
+        }
     }
     findings.into_iter().collect()
 }
@@ -107,29 +126,18 @@ fn is_io_path(path: &str) -> bool {
         .any(|io| path == *io || path.starts_with(&format!("{io}::")))
 }
 
-/// Files reached through `include!` or `#[path]` must stay inside `src/`, where every file is
-/// scanned: a relative path with no `..`.
-fn stays_inside(path: &str) -> bool {
-    let path = Path::new(path);
-    path.is_relative()
-        && path
-            .components()
-            .all(|part| matches!(part, Component::Normal(_) | Component::CurDir))
-}
-
-fn outside_message(what: &str, path: &str) -> String {
-    format!(
-        "{what} \"{path}\" may reach a file outside src/; I/O-free crates include only \
-         files inside src/, by a relative path without `..`"
-    )
-}
-
 /// A glob import `base::*` is I/O when `base` is I/O or contains an I/O module.
 fn is_io_glob(base: &str) -> bool {
     is_io_path(base)
         || IO_PATHS
             .iter()
             .any(|io| io.starts_with(&format!("{base}::")))
+}
+
+/// The name of an identifier without the `r#` of a raw identifier.
+fn name_of(ident: &proc_macro2::Ident) -> String {
+    let name = ident.to_string();
+    name.strip_prefix("r#").map(str::to_owned).unwrap_or(name)
 }
 
 struct Visitor<'f> {
@@ -163,85 +171,132 @@ impl<'ast> Visit<'ast> for Visitor<'_> {
             } else if is_io_path(path) {
                 self.add(used.span, io_path_message(path));
             }
+            if let Some(last) = path.rsplit("::").next()
+                && INCLUDE_MACROS.contains(&last)
+            {
+                self.add(used.span, include_message(last));
+            }
         }
         visit::visit_item_use(self, item);
     }
 
-    fn visit_item_extern_crate(&mut self, item: &'ast syn::ItemExternCrate) {
-        // A `#![no_std]` crate needs `extern crate alloc` for heap types; `core` is harmless.
-        if item.ident != "alloc" && item.ident != "core" {
-            self.add(
-                item.span(),
-                format!(
-                    "declares `extern crate {}`; I/O-free crates use only core and alloc",
-                    item.ident
-                ),
-            );
-        }
-        visit::visit_item_extern_crate(self, item);
-    }
-
-    fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
-        for attr in item
-            .attrs
-            .iter()
-            .filter(|attr| attr.path().is_ident("path"))
-        {
-            let literal = match &attr.meta {
-                syn::Meta::NameValue(value) => match &value.value {
-                    syn::Expr::Lit(syn::ExprLit {
-                        lit: syn::Lit::Str(path),
-                        ..
-                    }) => Some(path.value()),
-                    _ => None,
-                },
-                _ => None,
-            };
-            match literal {
-                Some(path) if stays_inside(&path) => {}
-                Some(path) => self.add(attr.span(), outside_message("#[path]", &path)),
-                None => self.add(
-                    attr.span(),
-                    "#[path] without a plain string cannot be checked".to_owned(),
-                ),
-            }
-        }
-        visit::visit_item_mod(self, item);
-    }
-
     fn visit_item_foreign_mod(&mut self, item: &'ast syn::ItemForeignMod) {
-        self.add(
-            item.span(),
-            "declares an `extern` block; foreign functions can do any I/O".to_owned(),
-        );
+        self.add(item.span(), extern_block_message());
         visit::visit_item_foreign_mod(self, item);
     }
 
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
         if let Some(last) = mac.path.segments.last() {
-            let name = last.ident.to_string();
+            let name = name_of(&last.ident);
             if IO_MACROS.contains(&name.as_str()) {
                 self.add(
                     mac.path.span(),
                     format!("calls `{name}!`, which writes to the console"),
                 );
             }
-            if name == "include" {
-                match mac.parse_body::<syn::LitStr>() {
-                    Ok(path) if stays_inside(&path.value()) => {}
-                    Ok(path) => {
-                        self.add(mac.path.span(), outside_message("include!", &path.value()))
-                    }
-                    Err(_) => self.add(
-                        mac.path.span(),
-                        "include! with a computed path cannot be checked; I/O-free crates \
-                         include only files inside src/"
-                            .to_owned(),
-                    ),
-                }
-            }
         }
         visit::visit_macro(self, mac);
+    }
+}
+
+fn include_message(name: &str) -> String {
+    format!("uses `{name}!`; I/O-free crates include no other files")
+}
+
+fn extern_block_message() -> String {
+    "declares an `extern` block; foreign functions can do any I/O".to_owned()
+}
+
+fn extern_crate_message(name: &str) -> String {
+    format!("declares `extern crate {name}`; I/O-free crates use only core and alloc")
+}
+
+fn macro_rules_message() -> String {
+    "defines a macro with `macro_rules!`; I/O-free crates define no macros, so all of their \
+     code stays visible to this check"
+        .to_owned()
+}
+
+fn path_attribute_message() -> String {
+    "sets a module file with `path =` in an attribute; I/O-free crates keep every module in \
+     its default file under src/"
+        .to_owned()
+}
+
+fn is_punct(token: Option<&TokenTree>, ch: char) -> bool {
+    matches!(token, Some(TokenTree::Punct(punct)) if punct.as_char() == ch)
+}
+
+fn ident_name(token: Option<&TokenTree>) -> Option<String> {
+    match token {
+        Some(TokenTree::Ident(ident)) => Some(name_of(ident)),
+        _ => None,
+    }
+}
+
+/// Whether the tokens before a `[...]` group make it an attribute: `#[...]` or `#![...]`.
+fn opens_attribute(before: &[TokenTree]) -> bool {
+    match before {
+        [.., TokenTree::Punct(hash), TokenTree::Punct(bang)]
+            if hash.as_char() == '#' && bang.as_char() == '!' =>
+        {
+            true
+        }
+        [.., TokenTree::Punct(hash)] => hash.as_char() == '#',
+        _ => false,
+    }
+}
+
+/// The rules that must hold everywhere, macro bodies and attribute arguments included.
+fn scan_token_rules(stream: TokenStream, in_attribute: bool, findings: &mut BTreeSet<Finding>) {
+    let tokens: Vec<TokenTree> = stream.into_iter().collect();
+    let mut add = |span: Span, message: String| {
+        findings.insert(Finding {
+            line: span.start().line,
+            message,
+        });
+    };
+    let mut nested = Vec::new();
+    for (index, token) in tokens.iter().enumerate() {
+        let next = tokens.get(index + 1);
+        match token {
+            TokenTree::Group(group) => {
+                let attribute =
+                    group.delimiter() == Delimiter::Bracket && opens_attribute(&tokens[..index]);
+                nested.push((group.stream(), in_attribute || attribute));
+            }
+            TokenTree::Ident(ident) => {
+                let name = name_of(ident);
+                if INCLUDE_MACROS.contains(&name.as_str())
+                    && (is_punct(next, '!') || ident_name(next).as_deref() == Some("as"))
+                {
+                    add(ident.span(), include_message(&name));
+                } else if name == "macro_rules" && is_punct(next, '!') {
+                    add(ident.span(), macro_rules_message());
+                } else if name == "extern" {
+                    if ident_name(next).as_deref() == Some("crate") {
+                        if let Some(krate) = ident_name(tokens.get(index + 2))
+                            && !ALLOWED_EXTERN_CRATES.contains(&krate.as_str())
+                        {
+                            add(ident.span(), extern_crate_message(&krate));
+                        }
+                    } else if matches!(next, Some(TokenTree::Literal(_)))
+                        || matches!(next, Some(TokenTree::Group(group)) if group.delimiter() == Delimiter::Brace)
+                    {
+                        add(ident.span(), extern_block_message());
+                    }
+                } else if in_attribute
+                    && name == "path"
+                    && matches!(next, Some(TokenTree::Punct(eq)) if eq.as_char() == '=' && eq.spacing() == Spacing::Alone)
+                {
+                    add(ident.span(), path_attribute_message());
+                }
+            }
+            _ => {}
+        }
+    }
+    for (stream, in_attribute) in nested {
+        scan_token_rules(stream, in_attribute, findings);
     }
 }
 
@@ -260,14 +315,14 @@ fn flatten_use(tree: &syn::UseTree, prefix: &str, out: &mut Vec<UsedPath>) {
         }
     };
     match tree {
-        syn::UseTree::Path(path) => flatten_use(&path.tree, &join(&path.ident.to_string()), out),
+        syn::UseTree::Path(path) => flatten_use(&path.tree, &join(&name_of(&path.ident)), out),
         syn::UseTree::Name(name) => out.push(UsedPath {
-            path: join(&name.ident.to_string()),
+            path: join(&name_of(&name.ident)),
             span: name.ident.span(),
             renamed: false,
         }),
         syn::UseTree::Rename(rename) => out.push(UsedPath {
-            path: join(&rename.ident.to_string()),
+            path: join(&name_of(&rename.ident)),
             span: rename.ident.span(),
             renamed: true,
         }),
@@ -299,7 +354,7 @@ fn flatten(stream: TokenStream, out: &mut Vec<Token>) {
                 flatten(group.stream(), out);
                 out.push(Token::Other);
             }
-            TokenTree::Ident(ident) => out.push(Token::Ident(ident.to_string(), ident.span())),
+            TokenTree::Ident(ident) => out.push(Token::Ident(name_of(&ident), ident.span())),
             TokenTree::Punct(punct)
                 if punct.as_char() == ':' && punct.spacing() == Spacing::Joint =>
             {
@@ -315,7 +370,7 @@ fn flatten(stream: TokenStream, out: &mut Vec<Token>) {
     }
 }
 
-fn scan_tokens(tokens: &[Token], findings: &mut BTreeSet<Finding>) {
+fn scan_std_paths(tokens: &[Token], findings: &mut BTreeSet<Finding>) {
     for (start, token) in tokens.iter().enumerate() {
         let Token::Ident(first, span) = token else {
             continue;
@@ -396,13 +451,17 @@ mod tests {
     }
 
     #[test]
-    fn flags_includes_and_module_paths_that_may_leave_src() {
-        let source = "include!(\"../outside.rs\");\n\
-                      include!(concat!(env!(\"OUT_DIR\"), \"/generated.rs\"));\n\
-                      #[path = \"../../elsewhere/io.rs\"] mod io;\n\
-                      #[path = \"/tmp/io.rs\"] mod absolute;\n\
-                      include!(\"/tmp/io.rs\");\n";
-        assert_eq!(lines(source), vec![1, 2, 3, 4, 5]);
+    fn flags_includes_module_paths_and_macro_definitions_in_any_form() {
+        let source = "include!(\"tables.rs\");\n\
+                      const T: &str = core::include_str!(\"../x.txt\");\n\
+                      use core::include as inc;\n\
+                      use core::{include_bytes};\n\
+                      #[path = \"tasks/model.rs\"] mod model;\n\
+                      #[cfg_attr(all(), path = \"../x.rs\")] mod x;\n\
+                      macro_rules! hide { () => { extern crate std as s; } }\n\
+                      fn f() { let _ = [r#include!(\"y.rs\")]; }\n\
+                      mod inner { #![cfg_attr(all(), path = \"../z.rs\")] }\n";
+        assert_eq!(lines(source), vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
     }
 
     #[test]
@@ -415,8 +474,8 @@ mod tests {
                       mod path { pub fn io() {} }\n\
                       fn local() { path::io(); }\n\
                       extern crate alloc;\n\
-                      include!(\"tables/generated.rs\");\n\
-                      #[path = \"tasks/model.rs\"] mod model;\n";
+                      pub fn include(task: u32) -> u32 { let path = task; path }\n\
+                      #[derive(Debug)] #[cfg(feature = \"path\")] pub struct Task;\n";
         assert_eq!(found(source), vec![]);
     }
 
