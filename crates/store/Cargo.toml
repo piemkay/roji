@@ -11,6 +11,7 @@ publish.workspace = true
 sqlx.workspace = true
 
 [dev-dependencies]
+boundaries.workspace = true
 tokio.workspace = true
 
 [lints]

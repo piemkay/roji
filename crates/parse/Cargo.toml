@@ -9,5 +9,8 @@ publish.workspace = true
 
 [dependencies]
 
+[dev-dependencies]
+boundaries.workspace = true
+
 [lints]
 workspace = true
