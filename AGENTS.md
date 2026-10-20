@@ -34,5 +34,6 @@ Run `scripts/check` before every commit. CI runs the same command, and it must p
 ## Running it
 
 - `scripts/dev up` starts Postgres, the server and the web app for this worktree, on ports and
-  a database of its own; `scripts/dev status`, `scripts/dev down`, `scripts/dev clean`.
+  a database of its own; `scripts/dev status`, `scripts/dev down`, `scripts/dev clean`. It
+  refuses worktree paths with `$`, a backtick, quotes, `\` or control characters.
 - `eval "$(scripts/dev env test)"` points `cargo test` at this worktree's test database.

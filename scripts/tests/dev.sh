@@ -43,6 +43,7 @@ alive() { kill -0 "$1" 2>/dev/null; }
 gone() { ! kill -0 "$1" 2>/dev/null; }
 missing() { [[ ! -e $1 ]]; }
 fails() { ! "$@" >/dev/null 2>&1; }
+lacks() { ! grep -q "$1" "$2"; }
 
 postmaster_of() { head -n 1 "$1/.dev/postgres/postmaster.pid"; }
 
@@ -130,6 +131,48 @@ check "fails when the Postgres download fails" [ "$status" -ne 0 ]
 no_downloads() { ! compgen -G "$1/roji/download.*" >/dev/null; }
 check "leaves no download folder behind" no_downloads "$work/empty-cache"
 check "creates no cluster without binaries" missing "$d/.dev/postgres"
+
+# Worktree paths with characters that pg_ctl's shell would read are refused before anything
+# starts, and a command hidden in the path never runs. A space is fine.
+repo_at() {
+  mkdir -p "$1/scripts"
+  git -C "$1" init -q
+  cp "$scripts/dev" "$1/scripts/dev"
+}
+# shellcheck disable=SC2016 # the $(...) and `...` must stay in the names as they are
+for name in 'repo-$(touch pwned)' 'repo-`touch pwned`' 'repo-"quote' "repo-'quote" \
+  'repo-back\slash' $'repo-new\nline' $'repo-tab\tx'; do
+  bad="$work/$name"
+  repo_at "$bad"
+  (cd "$work" && "$bad/scripts/dev" db >"$work/bad.out" 2>&1)
+  status=$?
+  shown=$(printf '%q' "$name")
+  check "refuses the worktree path $shown" [ "$status" -ne 0 ]
+  check "says why it refuses $shown" grep -q "contains" "$work/bad.out"
+  check "starts nothing in $shown" missing "$bad/.dev"
+done
+check "never runs a command hidden in a worktree path" missing "$work/pwned"
+
+spaced="$work/repo-with space"
+repo_at "$spaced"
+check "accepts a worktree path with a space" [ "$("$spaced/scripts/dev" db 2>/dev/null)" = started ]
+pg_spaced=$(postmaster_of "$spaced") || true
+
+# Without HOME and XDG_CACHE_HOME, dev takes the home directory from the user database, and
+# down stops Postgres with the binaries it runs from.
+env -u HOME -u XDG_CACHE_HOME "$spaced/scripts/dev" down >"$work/home.out" 2>&1
+status=$?
+check "down works without HOME" [ "$status" -eq 0 ]
+check "down without HOME reports no unbound variable" lacks "unbound" "$work/home.out"
+check "down stops Postgres in a path with a space" gone "$pg_spaced"
+
+# A port with a leading zero would be octal to bash: it is ignored without an arithmetic error.
+e=$(new_repo e)
+mkdir -p "$e/.dev"
+printf 'PORT_BASE=09990\nDB_NAME=roji_e\n' >"$e/.dev/state.env"
+"$e/scripts/dev" env >"$work/e.out" 2>&1
+check "reads a port with a leading zero without an arithmetic error" lacks "value too great" "$work/e.out"
+check "says that port is invalid" grep -q "invalid PORT_BASE" "$work/e.out"
 
 if ((failures > 0)); then
   echo "$failures scripts/dev test(s) failed"
