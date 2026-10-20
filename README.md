@@ -46,7 +46,7 @@ Not scheduled: sharing, groups and invitations (the data model carries spaces fr
 Develop on Linux, or on Windows through WSL. You need:
 
 - [rustup](https://rustup.rs) and a C linker (`cc`, for example from `build-essential`). `rust-toolchain.toml` selects the Rust version.
-- Node.js 22.12 or later and pnpm 12. `web/package.json` names the exact pnpm version.
+- Node.js 24, the major version in `.node-version` (CI installs exactly that version), and pnpm 12. `web/package.json` names the exact pnpm version.
 - `git`, `curl`, `tar`, `xz`, `unzip`, `sha256sum` and `setsid`, which most Linux distributions include.
 
 Postgres 18 and gitleaks are downloaded on first use into `~/.cache/roji` and checked against pinned SHA-256 sums. To use your own Postgres 18, set `ROJI_PG_BIN` to its `bin` directory.

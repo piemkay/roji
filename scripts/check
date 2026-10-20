@@ -13,12 +13,21 @@ cd "$root"
 
 step() { printf '\n==> %s\n' "$*"; }
 
-for tool in cargo pnpm curl; do
+for tool in cargo cc node pnpm curl; do
   command -v "$tool" >/dev/null || {
     echo "check: $tool is required; see Development in README.md" >&2
     exit 1
   }
 done
+
+# The same Node.js major version as CI, which installs the version in .node-version.
+node_wanted=$(cat .node-version)
+node_running=$(node --version)
+node_running=${node_running#v}
+if [[ ${node_running%%.*} != "${node_wanted%%.*}" ]]; then
+  echo "check: Node.js ${node_wanted%%.*} is required (.node-version says $node_wanted); this is $node_running" >&2
+  exit 1
+fi
 
 if command -v rustup >/dev/null; then
   step "Rust toolchain from rust-toolchain.toml"

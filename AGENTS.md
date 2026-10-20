@@ -28,6 +28,7 @@ Run `scripts/check` before every commit. CI runs the same command, and it must p
   `tests/tasks.rs` in any crate, and `web/src/tasks/`. Crate roots and entry points (`lib`,
   `main`, `mod`, `bin`, `App`), boundary tests, manifests, lock files, `scripts/`, `tools/`,
   CI and docs are shared and don't count.
+- **Node.js** must have the major version in `.node-version`, which CI installs.
 
 ## Running it
 
