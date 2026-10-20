@@ -82,6 +82,29 @@ check "treats entry points, boundary tests and tooling as shared" passes scripts
 check "says that no module changed" grep -q "no module" "$work/out"
 reset
 
+touch_files web/src/app/tasks/List.tsx web/src/app/projects/List.tsx
+check "fails two modules under web/src/app/" fails scripts/check-scope
+check "names the modules under app/" grep -q "^  projects$" "$work/out"
+reset
+
+touch_files web/src/app/tasks/List.tsx crates/domain/src/tasks.rs web/src/app/App.tsx \
+  crates/server/src/bin/roji.rs
+check "reads the folder below app/ as the module" passes scripts/check-scope
+check "names the module below app/" grep -q "one module: tasks" "$work/out"
+reset
+
+touch_files crates/domain/src/tasks.rs web/src/vite-env.d.ts web/src/index.css web/src/App.css \
+  web/src/logo.svg web/src/index.ts
+check "treats styles, images, type declarations and index files as shared" passes scripts/check-scope
+check "still names the one module" grep -q "one module: tasks" "$work/out"
+reset
+
+touch_files crates/domain/src/tasks.rs web/src/projects/List.tsx
+check "falls back to a local main without origin/main" \
+  fails env -u ROJI_BASE_REF -u GITHUB_BASE_REF scripts/check-scope
+check "compares with that main" grep -q "compared with main" "$work/out"
+reset
+
 if ((failures > 0)); then
   echo "$failures scripts/check-scope test(s) failed"
   exit 1

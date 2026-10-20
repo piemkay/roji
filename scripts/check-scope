@@ -3,37 +3,54 @@
 # committed yet) may change at most one module.
 #
 # A module is a feature area, such as tasks or projects, and it cuts across the layers. Its
-# name is the first part of a path below src/ or tests/ in any crate in crates/, or below
-# web/src/ or web/tests/: crates/store/src/tasks.rs, crates/server/src/tasks/routes.rs,
-# crates/server/tests/tasks.rs and web/src/tasks/List.tsx all belong to "tasks". A file
-# directly below such a folder counts by its name without extensions (tasks.test.ts is
-# "tasks"). Names are compared in lower case, with "-" read as "_".
+# name is the first part of a path below src/ or tests/ (or benches/, examples/) in any crate in
+# crates/, or below web/src/ or web/tests/: crates/store/src/tasks.rs,
+# crates/server/src/tasks/routes.rs, crates/server/tests/tasks.rs and web/src/tasks/List.tsx
+# all belong to "tasks". The folders app/ and bin/ only group things: the folder one level
+# below them is the module (web/src/app/tasks/ is "tasks"). Names are compared in lower case,
+# with "-" read as "_".
 #
-# Shared files belong to no module and do not count: the crate roots and entry points (lib,
-# main, mod, bin, App), the boundary tests, manifests and lock files, scripts/, tools/, CI and
+# Every folder there is a module. A file directly there is the module of its name without
+# extensions (tasks.test.ts is "tasks") when it is code (.rs, .ts, .tsx, .js, .jsx, ...);
+# these files are shared and do not count: entry points (lib, main, mod, index, App, also
+# directly inside app/ or bin/), the boundary tests, type declarations (.d.ts), styles, images
+# and other files that are not code. So are manifests, lock files, scripts/, tools/, CI and
 # docs.
 #
-# The base is ROJI_BASE_REF, else origin/$GITHUB_BASE_REF in a pull request, else origin/main.
+# The base is ROJI_BASE_REF; else origin/$GITHUB_BASE_REF in a pull request; else origin/main,
+# or main when there is no origin/main.
 set -euo pipefail
 shopt -s inherit_errexit # a failing command inside $(...) stops the script too
 
 root=$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)
 cd "$root"
 
-base_ref=${ROJI_BASE_REF:-origin/${GITHUB_BASE_REF:-main}}
-if ! git rev-parse --verify --quiet "$base_ref^{commit}" >/dev/null; then
-  if [[ -n ${CI:-} || -n ${ROJI_BASE_REF:-} ]]; then
+exists() { git rev-parse --verify --quiet "$1^{commit}" >/dev/null; }
+
+if [[ -n ${ROJI_BASE_REF:-} || -n ${GITHUB_BASE_REF:-} ]]; then
+  base_ref=${ROJI_BASE_REF:-origin/$GITHUB_BASE_REF}
+  exists "$base_ref" || {
     echo "check-scope: $base_ref is missing; fetch the full history" >&2
     exit 1
-  fi
-  echo "check-scope: no $base_ref to compare with; skipped" >&2
+  }
+elif exists origin/main; then
+  base_ref=origin/main
+elif exists main; then
+  base_ref=main
+elif [[ -n ${CI:-} ]]; then
+  echo "check-scope: origin/main is missing; fetch the full history" >&2
+  exit 1
+else
+  echo "check-scope: no main branch to compare with; skipped" >&2
   exit 0
 fi
 base=$(git merge-base "$base_ref" HEAD)
 
+normalized() { printf '%s' "$1" | LC_ALL=C tr '[:upper:]-' '[:lower:]_'; }
+
 # Prints the module a path belongs to, or nothing for a shared file.
 module_of() {
-  local path=$1 rest name
+  local path=$1 rest first name
   case "$path" in
     crates/*/src/?* | crates/*/tests/?* | crates/*/benches/?* | crates/*/examples/?*)
       rest=${path#crates/*/}
@@ -42,13 +59,26 @@ module_of() {
     web/src/?* | web/tests/?*) rest=${path#web/*/} ;;
     *) return 0 ;;
   esac
-  name=${rest%%/*}
-  if [[ $name == "$rest" ]]; then
-    name=${name%%.*} # a file: its name without extensions
+  first=${rest%%/*}
+  if [[ $first != "$rest" ]] && [[ $(normalized "$first") == app || $(normalized "$first") == bin ]]; then
+    rest=${rest#*/}
+    first=${rest%%/*}
+    # Files directly inside app/ or bin/ are entry points.
+    [[ $first != "$rest" ]] || return 0
   fi
-  name=$(printf '%s' "$name" | LC_ALL=C tr '[:upper:]-' '[:lower:]_')
+  if [[ $first != "$rest" ]]; then
+    normalized "$first" # a folder
+    echo
+    return 0
+  fi
+  case "$first" in
+    *.d.ts) return 0 ;;
+    *.rs | *.ts | *.tsx | *.js | *.jsx | *.mts | *.cts | *.mjs | *.cjs) ;;
+    *) return 0 ;; # styles, images and other files that are not code
+  esac
+  name=$(normalized "${first%%.*}")
   case "$name" in
-    "" | lib | main | mod | bin | app | boundary) return 0 ;;
+    "" | lib | main | mod | index | app | boundary) return 0 ;;
   esac
   printf '%s\n' "$name"
 }

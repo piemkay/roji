@@ -24,11 +24,11 @@ Run `scripts/check` before every commit. CI runs the same command, and it must p
   days earlier (`web/pnpm-workspace.yaml`), and checks the lockfile against that.
 - **No secrets in the repository.** gitleaks scans the commits of this branch that are not on
   `main`, the index and the working tree; no `.env` file may be tracked.
-- **One change, one module.** Compared with `main`, a branch changes at most one module. A
-  module is a feature area across the layers: `tasks` is `src/tasks.rs` or `src/tasks/` and
-  `tests/tasks.rs` in any crate, and `web/src/tasks/`. Crate roots and entry points (`lib`,
-  `main`, `mod`, `bin`, `App`), boundary tests, manifests, lock files, `scripts/`, `tools/`,
-  CI and docs are shared and don't count.
+- **One change, one module.** Compared with `main`, a branch changes at most one module: a
+  feature area across the layers. `tasks` is `src/tasks.rs` or `src/tasks/` and
+  `tests/tasks.rs` in any crate, and `web/src/tasks/`; below `app/` or `bin/`, the next folder
+  is the module. Entry points (`lib`, `main`, `mod`, `index`, `App`), boundary tests, files
+  that are not code, manifests, lock files, `scripts/`, `tools/`, CI and docs don't count.
 - **Node.js** must have the major version in `.node-version`, which CI installs.
 
 ## Running it
