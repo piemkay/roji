@@ -20,6 +20,8 @@ check() {
 }
 passes() { "$@" >"$work/out" 2>&1; }
 fails() { ! "$@" >"$work/out" 2>&1; }
+lacks() { ! grep -q "$1" "$2"; }
+no_downloads() { ! compgen -G "$1/roji/download.*" >/dev/null; }
 
 fake_token() { printf 'ghp_%s' "$(head -c 600 /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9' | head -c 36)"; }
 
@@ -67,13 +69,22 @@ rm .env
 
 check "passes again once the branch is clean" passes scripts/check-secrets
 
+printf 'token = "%s"\n' "$(fake_token)" >staged.txt
+git add staged.txt
+rm staged.txt
+check "finds a secret that is only staged" fails scripts/check-secrets
+git rm -q --cached staged.txt
+
+status=0
+env -u HOME -u XDG_CACHE_HOME scripts/check-secrets >"$work/out" 2>&1 || status=$?
+check "runs without HOME" [ "$status" -eq 0 ]
+check "reports no unbound variable without HOME" lacks "unbound" "$work/out"
+
 # A download that fails (here: through a proxy that refuses) stops the check and leaves no
 # temporary folder behind.
 mkdir -p "$work/empty-cache"
 check "fails when the gitleaks download fails" fails env XDG_CACHE_HOME="$work/empty-cache" \
   HTTPS_PROXY=http://127.0.0.1:1 https_proxy=http://127.0.0.1:1 scripts/check-secrets
-lacks() { ! grep -q "$1" "$2"; }
-no_downloads() { ! compgen -G "$1/roji/download.*" >/dev/null; }
 check "stops before scanning" lacks "Scanning" "$work/out"
 check "leaves no download folder behind" no_downloads "$work/empty-cache"
 

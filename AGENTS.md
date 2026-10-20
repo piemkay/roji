@@ -23,7 +23,7 @@ Run `scripts/check` before every commit. CI runs the same command, and it must p
 - **New web packages wait three days.** pnpm installs only versions published at least three
   days earlier (`web/pnpm-workspace.yaml`), and checks the lockfile against that.
 - **No secrets in the repository.** gitleaks scans the commits of this branch that are not on
-  `main`, and the uncommitted files; no `.env` file may be tracked.
+  `main`, the index and the working tree; no `.env` file may be tracked.
 - **One change, one module.** Compared with `main`, a branch changes at most one module. A
   module is a feature area across the layers: `tasks` is `src/tasks.rs` or `src/tasks/` and
   `tests/tasks.rs` in any crate, and `web/src/tasks/`. Crate roots and entry points (`lib`,
