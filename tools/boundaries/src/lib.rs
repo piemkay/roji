@@ -3,6 +3,12 @@
 //! Each crate states its own rules in its `tests/boundary.rs`, so `cargo test` fails as soon as
 //! the crate depends on, or (for I/O-free crates) uses, something its rules do not allow.
 //! Only normal dependencies count: dev- and build-dependencies never reach the shipped code.
+//! Dependencies for every target platform count, including WebAssembly.
+//!
+//! Every crate root must also declare `#![forbid(unsafe_code)]`, and the root of an I/O-free
+//! crate `#![no_std]`, so the compiler itself keeps `std`, and with it all I/O, out.
+
+#![forbid(unsafe_code)]
 
 mod scan;
 
@@ -12,7 +18,7 @@ use std::sync::OnceLock;
 
 use cargo_metadata::{DependencyKind, Metadata, MetadataCommand, PackageId, TargetKind};
 
-pub use scan::{Finding, scan_source};
+pub use scan::{CrateAttributes, Finding, crate_attributes, scan_source};
 
 /// Async runtimes and the crates they are built on.
 pub const ASYNC_RUNTIMES: &[&str] = &[
@@ -111,8 +117,9 @@ impl Boundary {
         self
     }
 
-    /// No I/O: no async runtime, database or web crate in the dependency tree, and no file,
-    /// network, process, environment, thread, clock or console access in the sources.
+    /// No I/O: a `#![no_std]` crate root, no async runtime, database or web crate in the
+    /// dependency tree, and no file, network, process, environment, thread, clock or console
+    /// access in the sources, which may include other files only from inside `src/`.
     pub fn io_free(mut self) -> Self {
         self.io_free = true;
         self.forbidden.extend(owned(ASYNC_RUNTIMES));
@@ -187,6 +194,24 @@ impl Boundary {
             }
         }
 
+        for root in graph.crate_roots(id) {
+            let shown = graph.relative(&root).display().to_string();
+            match std::fs::read_to_string(&root) {
+                Ok(source) => {
+                    let attributes = crate_attributes(&source);
+                    if !attributes.forbids_unsafe_code {
+                        violations.push(format!("{shown} must declare #![forbid(unsafe_code)]"));
+                    }
+                    if self.io_free && !attributes.no_std {
+                        violations.push(format!(
+                            "{shown} must declare #![no_std]; I/O-free crates use only core and alloc"
+                        ));
+                    }
+                }
+                Err(err) => violations.push(format!("cannot read {shown}: {err}")),
+            }
+        }
+
         if self.io_free {
             for file in graph.source_files(id) {
                 let source = match std::fs::read_to_string(&file) {
@@ -216,16 +241,24 @@ impl Boundary {
 pub fn workspace_metadata() -> &'static Metadata {
     static METADATA: OnceLock<Metadata> = OnceLock::new();
     METADATA.get_or_init(|| {
-        MetadataCommand::new()
-            .current_dir(env!("CARGO_MANIFEST_DIR"))
-            .other_options(vec![
-                "--locked".to_owned(),
-                "--filter-platform".to_owned(),
-                env!("BOUNDARIES_TARGET").to_owned(),
-            ])
-            .exec()
-            .expect("`cargo metadata` failed")
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml");
+        metadata_for(&manifest, &["--locked"])
     })
+}
+
+/// The metadata of the workspace at `manifest`, with the dependencies of every target platform:
+/// no `--filter-platform`, so a dependency for WebAssembly only is still seen.
+pub fn metadata_for(manifest: &Path, options: &[&str]) -> Metadata {
+    MetadataCommand::new()
+        .manifest_path(manifest)
+        .other_options(
+            options
+                .iter()
+                .map(|option| (*option).to_owned())
+                .collect::<Vec<_>>(),
+        )
+        .exec()
+        .expect("`cargo metadata` failed")
 }
 
 struct Graph<'a> {
@@ -301,9 +334,9 @@ impl<'a> Graph<'a> {
         found
     }
 
-    /// The Rust files under the source directories of the package's library and binaries.
-    fn source_files(&self, id: &PackageId) -> Vec<PathBuf> {
-        let mut dirs: Vec<PathBuf> = self.metadata[id]
+    /// The root files (`src/lib.rs`, `src/main.rs`, ...) of the package's library and binaries.
+    fn crate_roots(&self, id: &PackageId) -> Vec<PathBuf> {
+        self.metadata[id]
             .targets
             .iter()
             .filter(|target| {
@@ -312,8 +345,16 @@ impl<'a> Graph<'a> {
                     .iter()
                     .any(|kind| matches!(kind, TargetKind::Lib | TargetKind::Bin))
             })
-            .filter_map(|target| target.src_path.parent())
-            .map(|dir| dir.as_std_path().to_path_buf())
+            .map(|target| target.src_path.as_std_path().to_path_buf())
+            .collect()
+    }
+
+    /// The Rust files under the source directories of the package's library and binaries.
+    fn source_files(&self, id: &PackageId) -> Vec<PathBuf> {
+        let mut dirs: Vec<PathBuf> = self
+            .crate_roots(id)
+            .iter()
+            .filter_map(|root| root.parent().map(Path::to_path_buf))
             .collect();
         dirs.sort();
         dirs.dedup();

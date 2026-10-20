@@ -1,7 +1,10 @@
 //! Finds I/O in Rust source: paths into the `std` modules that reach files, the network,
-//! processes, the environment, threads or the clock; console macros; `extern` blocks and crates.
+//! processes, the environment, threads or the clock; console macros; `extern` blocks; extern
+//! crates other than `alloc` and `core`; and `include!` or `#[path]` reaching outside `src/`.
+//! Also reads the attributes of a crate root.
 
 use std::collections::BTreeSet;
+use std::path::{Component, Path};
 use std::str::FromStr;
 
 use proc_macro2::{Spacing, Span, TokenStream, TokenTree};
@@ -31,6 +34,40 @@ pub const IO_MACROS: &[&str] = &["dbg", "eprint", "eprintln", "print", "println"
 pub struct Finding {
     pub line: usize,
     pub message: String,
+}
+
+/// The crate-level attributes the boundary checks look for in a crate root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CrateAttributes {
+    /// `#![forbid(unsafe_code)]`
+    pub forbids_unsafe_code: bool,
+    /// `#![no_std]`, unconditionally (not inside `cfg_attr`)
+    pub no_std: bool,
+}
+
+/// Reads the inner attributes of a crate root. A file that does not parse has none.
+pub fn crate_attributes(source: &str) -> CrateAttributes {
+    let mut found = CrateAttributes::default();
+    let Ok(file) = syn::parse_file(source) else {
+        return found;
+    };
+    for attr in file
+        .attrs
+        .iter()
+        .filter(|attr| matches!(attr.style, syn::AttrStyle::Inner(_)))
+    {
+        match &attr.meta {
+            syn::Meta::Path(path) if path.is_ident("no_std") => found.no_std = true,
+            syn::Meta::List(list) if list.path.is_ident("forbid") => {
+                let lints = list.tokens.to_string();
+                if lints.split(',').any(|lint| lint.trim() == "unsafe_code") {
+                    found.forbids_unsafe_code = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    found
 }
 
 /// Every piece of I/O in `source`, one finding per line and kind.
@@ -68,6 +105,23 @@ fn is_io_path(path: &str) -> bool {
     IO_PATHS
         .iter()
         .any(|io| path == *io || path.starts_with(&format!("{io}::")))
+}
+
+/// Files reached through `include!` or `#[path]` must stay inside `src/`, where every file is
+/// scanned: a relative path with no `..`.
+fn stays_inside(path: &str) -> bool {
+    let path = Path::new(path);
+    path.is_relative()
+        && path
+            .components()
+            .all(|part| matches!(part, Component::Normal(_) | Component::CurDir))
+}
+
+fn outside_message(what: &str, path: &str) -> String {
+    format!(
+        "{what} \"{path}\" may reach a file outside src/; I/O-free crates include only \
+         files inside src/, by a relative path without `..`"
+    )
 }
 
 /// A glob import `base::*` is I/O when `base` is I/O or contains an I/O module.
@@ -114,14 +168,45 @@ impl<'ast> Visit<'ast> for Visitor<'_> {
     }
 
     fn visit_item_extern_crate(&mut self, item: &'ast syn::ItemExternCrate) {
-        self.add(
-            item.span(),
-            format!(
-                "declares `extern crate {}`; depend on crates through Cargo.toml",
-                item.ident
-            ),
-        );
+        // A `#![no_std]` crate needs `extern crate alloc` for heap types; `core` is harmless.
+        if item.ident != "alloc" && item.ident != "core" {
+            self.add(
+                item.span(),
+                format!(
+                    "declares `extern crate {}`; I/O-free crates use only core and alloc",
+                    item.ident
+                ),
+            );
+        }
         visit::visit_item_extern_crate(self, item);
+    }
+
+    fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+        for attr in item
+            .attrs
+            .iter()
+            .filter(|attr| attr.path().is_ident("path"))
+        {
+            let literal = match &attr.meta {
+                syn::Meta::NameValue(value) => match &value.value {
+                    syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Str(path),
+                        ..
+                    }) => Some(path.value()),
+                    _ => None,
+                },
+                _ => None,
+            };
+            match literal {
+                Some(path) if stays_inside(&path) => {}
+                Some(path) => self.add(attr.span(), outside_message("#[path]", &path)),
+                None => self.add(
+                    attr.span(),
+                    "#[path] without a plain string cannot be checked".to_owned(),
+                ),
+            }
+        }
+        visit::visit_item_mod(self, item);
     }
 
     fn visit_item_foreign_mod(&mut self, item: &'ast syn::ItemForeignMod) {
@@ -140,6 +225,20 @@ impl<'ast> Visit<'ast> for Visitor<'_> {
                     mac.path.span(),
                     format!("calls `{name}!`, which writes to the console"),
                 );
+            }
+            if name == "include" {
+                match mac.parse_body::<syn::LitStr>() {
+                    Ok(path) if stays_inside(&path.value()) => {}
+                    Ok(path) => {
+                        self.add(mac.path.span(), outside_message("include!", &path.value()))
+                    }
+                    Err(_) => self.add(
+                        mac.path.span(),
+                        "include! with a computed path cannot be checked; I/O-free crates \
+                         include only files inside src/"
+                            .to_owned(),
+                    ),
+                }
             }
         }
         visit::visit_macro(self, mac);
@@ -297,6 +396,16 @@ mod tests {
     }
 
     #[test]
+    fn flags_includes_and_module_paths_that_may_leave_src() {
+        let source = "include!(\"../outside.rs\");\n\
+                      include!(concat!(env!(\"OUT_DIR\"), \"/generated.rs\"));\n\
+                      #[path = \"../../elsewhere/io.rs\"] mod io;\n\
+                      #[path = \"/tmp/io.rs\"] mod absolute;\n\
+                      include!(\"/tmp/io.rs\");\n";
+        assert_eq!(lines(source), vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
     fn allows_pure_code() {
         let source = "use std::collections::BTreeMap;\n\
                       use core::fmt::Write as _;\n\
@@ -304,7 +413,35 @@ mod tests {
                       pub fn later(d: Duration) -> std::time::Duration { d * 2 }\n\
                       pub fn text() -> String { format!(\"{}\", 1) }\n\
                       mod path { pub fn io() {} }\n\
-                      fn local() { path::io(); }\n";
+                      fn local() { path::io(); }\n\
+                      extern crate alloc;\n\
+                      include!(\"tables/generated.rs\");\n\
+                      #[path = \"tasks/model.rs\"] mod model;\n";
         assert_eq!(found(source), vec![]);
+    }
+
+    #[test]
+    fn reads_crate_attributes() {
+        assert_eq!(
+            crate_attributes("#![no_std]\n#![forbid(unsafe_code)]\n"),
+            CrateAttributes {
+                forbids_unsafe_code: true,
+                no_std: true
+            }
+        );
+        assert_eq!(
+            crate_attributes("#![forbid(missing_docs, unsafe_code)]\n"),
+            CrateAttributes {
+                forbids_unsafe_code: true,
+                no_std: false
+            }
+        );
+        // Conditional or weaker forms do not count.
+        assert_eq!(
+            crate_attributes(
+                "#![cfg_attr(not(test), no_std)]\n#![deny(unsafe_code)]\n#![forbid(unsafe_op_in_unsafe_fn)]\n"
+            ),
+            CrateAttributes::default()
+        );
     }
 }

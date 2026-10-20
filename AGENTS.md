@@ -6,15 +6,16 @@ Run `scripts/check` before every commit. CI runs the same command, and it must p
 
 - **Formatting, lint and types.** rustfmt; Clippy with warnings as errors; Prettier, oxlint and
   TypeScript for the web app.
-- **No unsafe Rust.** The workspace forbids `unsafe`.
+- **No unsafe Rust.** Every crate root declares `#![forbid(unsafe_code)]`.
 - **Crate boundaries.** Each crate's `tests/boundary.rs` states what it may use:
-  - `roji-domain` and `roji-parse` are I/O-free: no async runtime, database or web crate, no
-    external crate that is not on their list, and no `std::fs`, `io`, `net`, `path`,
-    `process`, `env`, `thread`, `os`, clock, console macros or `extern` blocks.
+  - `roji-domain` and `roji-parse` are I/O-free: `#![no_std]` (only `core` and `alloc`), no
+    async runtime, database or web crate for any target, no external crate that is not on
+    their list, no console macros or `extern` blocks, and `include!` or `#[path]` only for
+    files inside `src/`.
   - `roji-domain` uses no other crate of the workspace; `roji-parse` may use `roji-domain`.
   - `roji-store` owns the database and may use `roji-domain`, but no HTTP or web crate.
-  - `roji-server` may use the other crates, reaches the database only through `roji-store`, and
-    nothing depends on it.
+  - `roji-server` may use the other crates, reaches the database only through `roji-store`,
+    and nothing depends on it.
 - **Web boundary.** Code in `web/src` imports only from `web/src` and the `dependencies` in
   `web/package.json` (tests may also use `devDependencies`), never Node built-ins or anything
   outside `web/`. It reaches the server only over HTTP at `/api`.

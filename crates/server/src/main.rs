@@ -7,6 +7,8 @@
 //! Once listening, the server prints `listening on <address>` as its first line on stdout.
 //! Logs go to stderr.
 
+#![forbid(unsafe_code)]
+
 use std::env;
 
 use anyhow::Context;

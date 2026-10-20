@@ -1,5 +1,7 @@
 //! The Roji HTTP server. For now it only reports its own health and the database's.
 
+#![forbid(unsafe_code)]
+
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::get;

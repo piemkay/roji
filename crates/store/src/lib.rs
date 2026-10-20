@@ -1,6 +1,8 @@
 //! Postgres storage for Roji. This is the only crate that talks to the database; the server
 //! reaches it through [`Store`].
 
+#![forbid(unsafe_code)]
+
 use std::fmt;
 use std::time::Duration;
 
