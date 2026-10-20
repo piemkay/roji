@@ -18,7 +18,7 @@ Run `scripts/check` before every commit. CI runs the same command, and it must p
     and nothing depends on it.
 - **Web boundary.** Code in `web/src` imports only from `web/src` and the `dependencies` in
   `web/package.json` (tests may also use `devDependencies`), never Node built-ins or anything
-  outside `web/`. It reaches the server only over HTTP at `/api`.
+  outside `web/`.
 - **New web packages wait three days.** pnpm installs only versions published at least three
   days earlier (`web/pnpm-workspace.yaml`), and checks the lockfile against that.
 - **No secrets in the repository.** gitleaks scans the commits of this branch that are not on

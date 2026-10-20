@@ -45,7 +45,7 @@ Not scheduled: sharing, groups and invitations (the data model carries spaces fr
 
 Develop on Linux, or on Windows through WSL. You need:
 
-- [rustup](https://rustup.rs) and a C linker (`cc`, for example from `build-essential`). `rust-toolchain.toml` selects the Rust version.
+- [rustup](https://rustup.rs) and a C compiler as `cc`, which Rust uses to link (for example `build-essential` on Debian or Ubuntu). `rust-toolchain.toml` selects the Rust version.
 - Node.js 24, the major version in `.node-version` (CI installs exactly that version), and pnpm 12. `web/package.json` names the exact pnpm version.
 - `git`, `curl`, `tar`, `xz`, `unzip`, `sha256sum` and `setsid`, which most Linux distributions include.
 
@@ -53,11 +53,12 @@ Postgres 18 and gitleaks are downloaded on first use into `~/.cache/roji` and ch
 
 | Command | What it does |
 |---|---|
-| `scripts/check` | The one check: formatting, lint, type checks, boundary checks and tests for the Rust workspace and the web app, plus the secret scan and the one-module rule. CI runs the same command. |
+| `scripts/check` | The one check: formatting, lint, type checks, boundary checks and tests for the Rust workspace and the web app, the tests of the scripts in `scripts/tests`, plus the secret scan and the one-module rule. CI runs the same command. |
 | `scripts/dev up` | Starts Postgres, the server and the web app for this worktree and checks that they are connected. Each worktree gets its own ports and database, so several can run at once. |
 | `scripts/dev status` | Shows ports, processes and health. |
 | `scripts/dev down` | Stops all three; the data stays in `.dev/`. |
 | `scripts/dev clean` | Stops all three and deletes this worktree's data. |
+| `scripts/dev env test` | Prints `export` lines that point `cargo test` at this worktree's test database. |
 
 `AGENTS.md` lists the rules the checks enforce. The Rust crates are in `crates/` (`domain`, `parse`, `store`, `server`), the React and TypeScript web app (built with Vite) is in `web/`, and the crate boundary checks are in `tools/boundaries`.
 
