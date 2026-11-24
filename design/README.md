@@ -1,6 +1,6 @@
 # Design tokens
 
-`tokens.json` holds Roji's design tokens in the W3C Design Tokens format (2025.10 draft; the color `$value` objects carry `colorSpace`, `components` and a `hex` fallback). It is the intended source for colors, typography, spacing, radii, sizes and motion in the web app.
+`tokens.json` holds Roji's design tokens in the W3C Design Tokens format (2025.10 draft; the color `$value` objects carry `colorSpace`, `components` and a `hex` fallback). It is the intended source for colors, typography, spacing, radii, sizes and motion in the app.
 
 ## What it defines
 
